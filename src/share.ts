@@ -71,32 +71,27 @@ export function generateShareUrl(shareId: string): string {
 }
 
 /**
- * 创建占位对话内容
- */
-export function createPlaceholderConversation(): FormattedMessage[] {
-  return [
-    { role: "user", content: "这是一个示例对话，因为无法获取实际对话内容" },
-    { role: "assistant", content: "由于技术限制，目前无法获取真实对话内容。我们将在后续版本中改进这一点。" }
-  ];
-}
-
-/**
  * 从Cursor上下文中提取聊天内容并格式化
  */
 function extractConversation(context: any): FormattedMessage[] {
   console.error("开始提取对话内容...");
   
-  // 记录上下文结构(仅在调试模式)
+  // 记录上下文结构(调试用)
   if (config.debug) {
     try {
-      const safeContext = JSON.stringify(context, (key, value) => {
-        // 缩短长文本
-        if (typeof value === 'string' && value.length > 200) {
-          return value.substring(0, 200) + '... (截断)';
-        }
-        return value;
-      }, 2);
-      console.error("上下文结构预览:", safeContext.substring(0, 1000) + (safeContext.length > 1000 ? '...' : ''));
+      // 保存完整上下文结构到日志文件（便于分析）
+      console.error("上下文结构:", JSON.stringify(Object.keys(context || {}), null, 2));
+      
+      // 记录部分上下文样本
+      if (context && context.conversation && context.conversation[0]) {
+        console.error("第一条消息样本:", JSON.stringify(context.conversation[0], null, 2));
+      }
+      if (context && context.bubbles && context.bubbles[0]) {
+        console.error("第一条气泡样本:", JSON.stringify(context.bubbles[0], null, 2));
+      }
+      if (context && context.messages && context.messages[0]) {
+        console.error("第一条消息样本:", JSON.stringify(context.messages[0], null, 2));
+      }
     } catch (err) {
       console.error("无法序列化上下文:", err);
     }
@@ -104,82 +99,200 @@ function extractConversation(context: any): FormattedMessage[] {
   
   // 如果上下文为空
   if (!context) {
-    console.error("上下文为空");
-    return createPlaceholderConversation();
+    console.error("上下文为空，无法提取会话");
+    return [];
   }
   
   // 检查有什么内容
   console.error("上下文键:", Object.keys(context));
   
   let messages: FormattedMessage[] = [];
+  let extracted = false;
   
-  // 处理方式1: 标准conversation数组
-  if (Array.isArray(context.conversation) && context.conversation.length > 0) {
+  // 处理方式1: Cursor的聊天历史格式
+  if (context.chatHistory && Array.isArray(context.chatHistory)) {
+    console.error("找到Cursor chatHistory格式");
+    
+    try {
+      messages = context.chatHistory.map((msg: any) => {
+        // 将Cursor的消息格式转换为我们的格式
+        return {
+          role: msg.role || (msg.isUser ? 'user' : 'assistant'),
+          content: typeof msg.content === 'string' ? msg.content : 
+                  (msg.content && msg.content.text ? msg.content.text : 
+                  (msg.text || ""))
+        };
+      }).filter((msg: any) => msg.content && msg.content.trim() !== "");
+      
+      if (messages.length > 0) {
+        console.error(`从chatHistory提取了${messages.length}条消息`);
+        extracted = true;
+      }
+    } catch (err) {
+      console.error("处理chatHistory失败:", err);
+    }
+  }
+  
+  // 处理方式2: 标准conversation数组
+  if (!extracted && Array.isArray(context.conversation) && context.conversation.length > 0) {
     console.error("找到标准conversation数组");
     
-    messages = context.conversation.map((msg: any) => {
-      // 尝试确定角色
-      const role = determineRole(msg);
+    try {
+      messages = context.conversation.map((msg: any) => {
+        // 尝试确定角色
+        const role = determineRole(msg);
+        
+        // 尝试提取内容
+        let content = '';
+        if (typeof msg.content === 'string') {
+          content = msg.content;
+        } else if (typeof msg.text === 'string') {
+          content = msg.text;
+        } else if (msg.content && typeof msg.content.text === 'string') {
+          content = msg.content.text;
+        } else if (msg.content && Array.isArray(msg.content)) {
+          // 处理内容数组格式
+          content = msg.content.map((part: any) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part.text === 'string') return part.text;
+            return '';
+          }).join('\n');
+        }
+        
+        return { role, content };
+      }).filter((msg: any) => msg.content && msg.content.trim() !== "");
       
-      // 尝试提取内容
-      let content = '';
-      if (typeof msg.content === 'string') {
-        content = msg.content;
-      } else if (typeof msg.text === 'string') {
-        content = msg.text;
-      } else if (msg.content && typeof msg.content.text === 'string') {
-        content = msg.content.text;
+      if (messages.length > 0) {
+        console.error(`从conversation提取了${messages.length}条消息`);
+        extracted = true;
       }
-      
-      // 截断过长内容
-      if (content.length > 100000) {
-        content = content.substring(0, 100000) + "... (内容已截断)";
-      }
-      
-      return { role, content };
-    });
+    } catch (err) {
+      console.error("处理conversation失败:", err);
+    }
   }
-  // 处理方式2: bubbles数组 (Cursor聊天界面可能使用这种格式)
-  else if (Array.isArray(context.bubbles) && context.bubbles.length > 0) {
+  
+  // 处理方式3: bubbles数组 (Cursor聊天界面可能使用这种格式)
+  if (!extracted && Array.isArray(context.bubbles) && context.bubbles.length > 0) {
     console.error("找到bubbles数组");
     
-    messages = context.bubbles.map((bubble: any) => {
-      const role = bubble.role || 'user';
-      let content = bubble.text || '';
+    try {
+      messages = context.bubbles.map((bubble: any) => {
+        const role = bubble.role || (bubble.isUser ? 'user' : 'assistant');
+        let content = '';
+        
+        // 处理不同内容格式
+        if (typeof bubble.content === 'string') {
+          content = bubble.content;
+        } else if (typeof bubble.text === 'string') {
+          content = bubble.text;
+        } else if (bubble.content && typeof bubble.content.text === 'string') {
+          content = bubble.content.text;
+        } else if (bubble.content && Array.isArray(bubble.content)) {
+          // 处理内容数组
+          content = bubble.content.map((part: any) => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part.text === 'string') return part.text;
+            return '';
+          }).join('\n');
+        }
+        
+        return { role, content };
+      }).filter((msg: any) => msg.content && msg.content.trim() !== "");
       
-      // 截断过长内容
-      if (content.length > 100000) {
-        content = content.substring(0, 100000) + "... (内容已截断)";
+      if (messages.length > 0) {
+        console.error(`从bubbles提取了${messages.length}条消息`);
+        extracted = true;
       }
-      
-      return { role, content };
-    });
+    } catch (err) {
+      console.error("处理bubbles失败:", err);
+    }
   }
-  // 处理方式3: 尝试从其他属性提取
-  else if (context.messages || context.history) {
+  
+  // 处理方式4: 尝试从其他属性提取
+  if (!extracted && (context.messages || context.history)) {
     const messageArray = context.messages || context.history || [];
     console.error("尝试从messages/history中提取");
     
     if (Array.isArray(messageArray) && messageArray.length > 0) {
-      messages = messageArray.map((msg: any) => {
-        const role = determineRole(msg);
-        let content = msg.content || msg.text || '';
+      try {
+        messages = messageArray.map((msg: any) => {
+          const role = determineRole(msg);
+          let content = '';
+          
+          // 处理不同内容格式
+          if (typeof msg.content === 'string') {
+            content = msg.content;
+          } else if (typeof msg.text === 'string') {
+            content = msg.text;
+          } else if (msg.content && typeof msg.content.text === 'string') {
+            content = msg.content.text;
+          } else if (msg.content && Array.isArray(msg.content)) {
+            // 处理内容数组
+            content = msg.content.map((part: any) => {
+              if (typeof part === 'string') return part;
+              if (part && typeof part.text === 'string') return part.text;
+              return '';
+            }).join('\n');
+          }
+          
+          return { role, content };
+        }).filter((msg: any) => msg.content && msg.content.trim() !== "");
         
-        // 截断过长内容
-        if (content.length > 100000) {
-          content = content.substring(0, 100000) + "... (内容已截断)";
+        if (messages.length > 0) {
+          console.error(`从messages/history提取了${messages.length}条消息`);
+          extracted = true;
         }
-        
-        return { role, content };
-      });
+      } catch (err) {
+        console.error("处理messages/history失败:", err);
+      }
     }
   }
   
-  // 如果没有找到任何消息，使用占位内容
-  if (messages.length === 0) {
-    console.error("未找到有效消息，使用占位内容");
-    return createPlaceholderConversation();
+  // 方式5: 尝试从原始上下文直接提取（某些客户端可能直接传递消息数组）
+  if (!extracted && Array.isArray(context) && context.length > 0) {
+    console.error("尝试从原始数组上下文提取");
+    
+    try {
+      messages = context.map((msg: any) => {
+        const role = determineRole(msg);
+        let content = '';
+        
+        if (typeof msg.content === 'string') {
+          content = msg.content;
+        } else if (typeof msg.text === 'string') {
+          content = msg.text;
+        } else if (msg.content && typeof msg.content.text === 'string') {
+          content = msg.content.text;
+        }
+        
+        return { role, content };
+      }).filter((msg: any) => msg.content && msg.content.trim() !== "");
+      
+      if (messages.length > 0) {
+        console.error(`从原始数组上下文提取了${messages.length}条消息`);
+        extracted = true;
+      }
+    } catch (err) {
+      console.error("处理原始数组上下文失败:", err);
+    }
   }
+  
+  // 如果没有找到任何消息，使用空数组告知API没有提取到内容
+  if (messages.length === 0) {
+    console.error("未能成功提取对话内容，将使用空数组");
+    return [];
+  }
+  
+  // 截断过长内容
+  messages = messages.map(msg => {
+    if (msg.content && msg.content.length > 100000) {
+      return {
+        ...msg,
+        content: msg.content.substring(0, 100000) + "... (内容已截断)"
+      };
+    }
+    return msg;
+  });
   
   console.error(`成功提取了 ${messages.length} 条消息`);
   return messages;
@@ -225,6 +338,15 @@ export async function handleShareChat(title: string, context: any): Promise<{ sh
   try {
     // 提取和格式化对话内容
     const conversation = extractConversation(context);
+    
+    // 如果无法提取任何内容，添加错误消息
+    if (conversation.length === 0) {
+      console.error("警告: 无法从上下文中提取任何对话内容");
+      // 添加错误消息，但不使用占位数据
+      conversation.push(
+        { role: "system", content: "注意：系统无法从原始对话中提取内容，请联系支持团队解决此问题。" }
+      );
+    }
     
     // 准备要发送到API的数据
     const shareData = {
