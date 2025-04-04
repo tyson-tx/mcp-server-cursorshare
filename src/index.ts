@@ -20,6 +20,42 @@ import {
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
+// 导入分享功能和服务器
+import { handleShareChat, updateConfig } from "./share.js";
+// 仅导入类型，不自动启动服务器
+import type { startWebServer } from "./server.js";
+
+/**
+ * 安全日志函数 - 使用stderr避免干扰MCP通信
+ */
+function safeLog(...args: any[]): void {
+  // 使用process.stderr而不是console.log来记录日志
+  process.stderr.write(args.map(arg => 
+    typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+  ).join(' ') + '\n');
+}
+
+// 更新分享链接的配置为模拟链接
+updateConfig({
+  useLocalServer: false,
+  remoteServerUrl: "https://share.example.com"
+});
+
+// 有条件地启动Web服务器（如果带--web参数）
+if (process.argv.includes('--web')) {
+  safeLog("Web服务器模式：尝试启动Web界面");
+  import('./server.js').then(({ startWebServer }) => {
+    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4567;
+    startWebServer(PORT);
+    updateConfig({
+      useLocalServer: true,
+      localServerUrl: `http://localhost:${PORT}`
+    });
+  }).catch(err => {
+    safeLog("启动Web服务器失败:", err);
+  });
+}
+
 /**
  * Type alias for a note object.
  */
@@ -116,6 +152,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["title", "content"]
         }
+      },
+      {
+        name: "share_chat",
+        description: "Share the current chat conversation and generate a sharable link",
+        inputSchema: {
+          type: "object",
+          properties: {
+            title: {
+              type: "string",
+              description: "Optional title for the shared chat"
+            }
+          },
+          required: []
+        }
       }
     ]
   };
@@ -143,6 +193,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           text: `Created note ${id}: ${title}`
         }]
       };
+    }
+    
+    case "share_chat": {
+      // Get optional title or use default
+      const title = String(request.params.arguments?.title || "Shared Chat");
+      
+      // 添加调试日志
+      safeLog("Share chat request received with params:", request.params);
+      
+      try {
+        // 使用share.ts中的函数处理分享请求
+        const context = request.params.context as any;
+        const { shareId, shareUrl } = handleShareChat(title, context);
+        
+        safeLog(`Successfully created share with ID: ${shareId}`);
+        
+        return {
+          content: [{
+            type: "text",
+            text: `我已经创建了分享链接: ${shareUrl}\n\n请注意：目前这是一个演示链接，实际内容可能无法查看。我们将在后续版本中实现完整功能。`
+          }]
+        };
+      } catch (error: any) {
+        safeLog("Error sharing chat:", error);
+        throw new Error(`分享失败: ${error.message}`);
+      }
     }
 
     default:
@@ -207,16 +283,11 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   };
 });
 
-/**
- * Start the server using stdio transport.
- * This allows the server to communicate via standard input/output streams.
- */
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-main().catch((error) => {
-  console.error("Server error:", error);
+// 启动服务器 - 使用stderr记录日志
+safeLog("Starting MCP server...");
+const transport = new StdioServerTransport();
+server.connect(transport).catch(error => {
+  safeLog("Failed to connect transport:", error);
   process.exit(1);
 });
+safeLog("MCP server is running and waiting for connections...");
