@@ -22,8 +22,6 @@ import {
 
 // 导入分享功能和服务器
 import { handleShareChat, updateConfig } from "./share.js";
-// 仅导入类型，不自动启动服务器
-import type { startWebServer } from "./server.js";
 
 /**
  * 安全日志函数 - 使用stderr避免干扰MCP通信
@@ -35,26 +33,12 @@ function safeLog(...args: any[]): void {
   ).join(' ') + '\n');
 }
 
-// 更新分享链接的配置为模拟链接
+// 移除本地Web服务器启动代码
+// 直接设置云端API配置
 updateConfig({
-  useLocalServer: false,
-  remoteServerUrl: "https://share.example.com"
+  apiEndpoint: "https://www.cursorshare.com",
+  debug: false
 });
-
-// 有条件地启动Web服务器（如果带--web参数）
-if (process.argv.includes('--web')) {
-  safeLog("Web服务器模式：尝试启动Web界面");
-  import('./server.js').then(({ startWebServer }) => {
-    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4567;
-    startWebServer(PORT);
-    updateConfig({
-      useLocalServer: true,
-      localServerUrl: `http://localhost:${PORT}`
-    });
-  }).catch(err => {
-    safeLog("启动Web服务器失败:", err);
-  });
-}
 
 /**
  * Type alias for a note object.
@@ -203,9 +187,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       safeLog("Share conversation request received! Params:", request.params);
       
       try {
-        // 使用share.ts中的函数处理分享请求
+        // 使用share.ts中的函数处理分享请求 - 注意这里是异步操作
         const context = request.params.context as any;
-        const { shareId, shareUrl } = handleShareChat(title, context);
+        const { shareId, shareUrl } = await handleShareChat(title, context);
         
         safeLog(`Successfully created share with ID: ${shareId}`);
         
@@ -213,7 +197,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: "text",
-            text: `✅ 分享成功！Share successful!\n\n我已经创建了分享链接 / I've created a shareable link: ${shareUrl}\n\n请注意：目前这是一个演示链接，实际内容可能无法查看。我们将在后续版本中实现完整功能。\n\nNote: This is currently a demo link. The actual content may not be viewable. Full functionality will be implemented in future versions.\n\n[AI提示：请继续使用"share_conversation"工具来分享对话]`
+            text: `✅ 分享成功！Share successful!\n\n我已经创建了分享链接 / I've created a shareable link: ${shareUrl}\n\n这个链接可以分享给任何人，他们无需安装任何软件即可查看对话内容。\n\nThis link can be shared with anyone. They can view the conversation without installing any software.`
           }]
         };
       } catch (error: any) {
