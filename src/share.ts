@@ -66,7 +66,7 @@ export function getSharedChat(id: string): SharedChat | null {
 export function generateShareUrl(shareId: string): string {
   // 根据配置决定使用本地还是远程URL
   const baseUrl = config.useLocalServer ? config.localServerUrl : config.remoteServerUrl;
-  return `${baseUrl}/share111/${shareId}`;
+  return `${baseUrl}/share/${shareId}`;
 }
 
 /**
@@ -83,16 +83,24 @@ export function createPlaceholderConversation(): any[] {
  * 处理分享聊天的请求
  */
 export function handleShareChat(title: string, context: any): { shareId: string, shareUrl: string } {
+  console.error("=====> 收到分享请求! <=====");
+  console.error("标题:", title);
+  console.error("上下文键:", Object.keys(context || {}));
+  console.error("=============================");
+  
   // 提取对话内容或使用占位内容
   let conversation;
   if (context?.conversation) {
+    console.error(`找到对话内容! 消息数量: ${context.conversation.length}`);
     conversation = context.conversation;
   } else {
+    console.error("⚠️ 未找到对话内容，使用占位内容");
     conversation = createPlaceholderConversation();
   }
   
   // 生成分享ID
   const shareId = generateShareId();
+  console.error(`🆔 生成分享ID: ${shareId}`);
   
   // 存储聊天内容
   storeSharedChat(shareId, {
@@ -101,9 +109,11 @@ export function handleShareChat(title: string, context: any): { shareId: string,
     createdAt: new Date(),
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days expiry
   });
+  console.error(`💾 存储分享数据成功, ID=${shareId}, 标题="${title}"`);
   
   // 生成分享URL
   const shareUrl = generateShareUrl(shareId);
+  console.error(`🔗 生成分享URL: ${shareUrl}`);
   
   return { shareId, shareUrl };
 }
