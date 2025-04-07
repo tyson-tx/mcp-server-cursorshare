@@ -47,7 +47,8 @@ updateLoggerConfig({
 // 直接设置云端API配置
 updateConfig({
   apiEndpoint: "https://www.cursorshare.com",
-  debug: false
+  debug: false,
+  autoOpenBrowser: true
 });
 
 /**

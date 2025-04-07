@@ -5,13 +5,17 @@
 import axios from 'axios';
 import { extractConversation, FormattedMessage, updateExtractorConfig } from './extractor.js';
 import { logDebug, logError, logInfo, logWarning } from './logger.js';
+import { exec } from 'child_process';
+import * as os from 'os';
 
 // 默认配置
 const DEFAULT_CONFIG = {
   // 远程API地址
   apiEndpoint: "https://www.cursorshare.com", // 默认值，需要替换为实际API
   // 是否启用调试模式
-  debug: false
+  debug: false,
+  // 是否自动打开浏览器
+  autoOpenBrowser: true
 };
 
 // 当前配置
@@ -127,9 +131,53 @@ export async function handleShareChat(title: string, context: any): Promise<{ sh
     
     logInfo(`成功生成分享链接: ${shareUrl}, ID: ${shareId}`);
     
+    // 在浏览器中打开URL
+    openBrowser(shareUrl);
+    
     return { shareId, shareUrl };
   } catch (error: any) {
     logError("分享失败:", error);
     throw new Error(`分享失败: ${error.message || '未知错误'}`);
+  }
+}
+
+/**
+ * 在浏览器中打开URL
+ */
+function openBrowser(url: string): void {
+  if (!config.autoOpenBrowser) {
+    return;
+  }
+  
+  try {
+    const platform = process.platform;
+    let command = '';
+    
+    // 根据不同平台确定打开浏览器的命令
+    switch (platform) {
+      case 'win32': // Windows
+        command = `start "${url}"`;
+        break;
+      case 'darwin': // macOS
+        command = `open "${url}"`;
+        break;
+      case 'linux': // Linux
+        command = `xdg-open "${url}"`;
+        break;
+      default:
+        logWarning(`不支持自动打开浏览器的平台: ${platform}`);
+        return;
+    }
+    
+    logInfo(`尝试打开浏览器: ${command}`);
+    exec(command, (error) => {
+      if (error) {
+        logError(`打开浏览器失败: ${error.message}`);
+      } else {
+        logInfo(`已在浏览器中打开分享链接`);
+      }
+    });
+  } catch (error) {
+    logError("打开浏览器过程中出错:", error);
   }
 }
