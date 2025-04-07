@@ -4,22 +4,23 @@
   "description": "An MCP server template",
   "private": true,
   "type": "module",
-  "main": "build/index.js",
+  "main": "dist/index.js",
   "bin": {
-    "mcp-server-cursorshare": "./build/index.js"
+    "mcp-server-cursorshare": "./dist/index.js"
   },
   "files": [
-    "build"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', '755')\"",
     "prepare": "npm run build",
     "watch": "tsc --watch",
-    "inspector": "npx @modelcontextprotocol/inspector build/index.js",
-    "start": "node build/index.js",
+    "inspector": "npx @modelcontextprotocol/inspector dist/index.js",
+    "start": "node dist/index.js",
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
+    "@chatmcp/sdk": "^1.0.5",
     "@modelcontextprotocol/sdk": "0.6.0",
     "axios": "^1.6.7",
     "better-sqlite3": "^11.9.1",

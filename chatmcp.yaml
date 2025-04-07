@@ -1,0 +1,46 @@
+params:
+  type: object
+  properties:
+    # 这里可以添加您的API密钥或其他配置参数
+  required: []
+
+rest:
+  name: cursorshare
+  port: 9593
+  endpoint: /rest
+
+npx:
+  command:
+    | npx -y mcp-server-cursorshare
+  config:
+    | {
+        "mcpServers": {
+          "cursorshare": {
+            "command": "npx",
+            "args": [
+              "-y",
+              "mcp-server-cursorshare"
+            ],
+            "env": {}
+          }
+        }
+      }
+
+docker:
+  command:
+    | docker run -i --rm mcp/cursorshare
+  config:
+    | {
+        "mcpServers": {
+          "cursorshare": {
+            "command": "docker",
+            "args": [
+              "run",
+              "-i",
+              "--rm",
+              "mcp/cursorshare"
+            ],
+            "env": {}
+          }
+        }
+      }

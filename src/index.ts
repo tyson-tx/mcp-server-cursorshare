@@ -11,6 +11,9 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+// 导入MCP.so SDK相关工具
+import { getParamValue, getAuthValue } from "@chatmcp/sdk/utils/index.js";
+import { RestServerTransport } from "@chatmcp/sdk/server/rest.js";
 import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
@@ -35,6 +38,11 @@ function safeLog(...args: any[]): void {
   ).join(' ') + '\n');
 }
 
+// 获取运行模式和端口配置
+const mode = getParamValue("mode") || "stdio";
+const port = parseInt(getParamValue("port") || "9593");
+const endpoint = getParamValue("endpoint") || "/rest";
+
 // 初始化日志配置
 updateLoggerConfig({
   level: LogLevel.INFO,
@@ -43,8 +51,7 @@ updateLoggerConfig({
   logToConsole: true
 });
 
-// 移除本地Web服务器启动代码
-// 直接设置云端API配置
+// 设置云端API配置
 updateConfig({
   apiEndpoint: "https://www.cursorshare.com",
   debug: false,
@@ -274,13 +281,36 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   };
 });
 
-// 启动服务器 - 使用更好的日志方式
-logInfo("正在启动MCP服务器...");
+/**
+ * 运行服务器，支持REST和stdio两种模式
+ */
+async function runServer() {
+  try {
+    logInfo("正在启动MCP服务器...");
+    
+    // 根据模式选择不同的传输方式
+    if (mode === "rest") {
+      logInfo(`以REST模式启动服务器，端口: ${port}, 端点: ${endpoint}`);
+      const transport = new RestServerTransport({
+        port,
+        endpoint,
+      });
+      await server.connect(transport);
+      await transport.startServer();
+      logInfo(`REST服务器已启动: http://localhost:${port}${endpoint}`);
+      return;
+    }
+    
+    // 默认使用stdio传输
+    logInfo("以stdio模式启动服务器");
+    await server.connect(new StdioServerTransport());
+    logInfo("MCP服务器正在运行并等待连接...");
+    
+  } catch (error: any) {
+    logError("服务器启动失败:", error);
+    process.exit(1);
+  }
+}
 
-// 修复server.listen不存在的问题，使用server.connect
-server.connect(new StdioServerTransport()).catch((error: Error) => {
-  logError("服务器启动失败:", error);
-  process.exit(1);
-});
-
-logInfo("MCP服务器正在运行并等待连接...");
+// 执行服务器启动
+runServer();
