@@ -4,6 +4,12 @@
  */
 
 import { logDebug, logError, logInfo, logWarning } from './logger.js';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+import { promises as fsPromises } from 'fs';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
 
 // 消息类型（统一格式）
 export type FormattedMessage = {
@@ -54,6 +60,10 @@ export type FormattedMessage = {
     if (msg.type === 'user' || msg.type === 'human') {
       return 'user';
     } else if (msg.type === 'assistant' || msg.type === 'ai' || msg.type === 'bot') {
+      return 'assistant';
+    } else if (msg.type === 1) {
+      return 'user';
+    } else if (msg.type === 2) {
       return 'assistant';
     }
     
@@ -525,134 +535,701 @@ export type FormattedMessage = {
   }
   
   /**
-   * 主提取函数 - 从上下文中提取对话内容
+   * 获取Cursor工作区存储路径
    */
-  export function extractConversation(context: any): FormattedMessage[] {
-    logInfo("=====> 开始提取对话内容 <=====");
-    
-    // 保存原始上下文调试信息
-    saveDebugContext(context);
-    
-    // 如果上下文为空
-    if (!context) {
-      logWarning("上下文为空，无法提取会话");
-      return [];
+  async function getCursorWorkspacePath(): Promise<string> {
+    try {
+      // 获取操作系统类型和用户主目录
+      const platform = process.platform;
+      const homeDir = os.homedir();
+      
+      // 根据不同操作系统设置工作区路径
+      let WORKSPACE_PATH;
+      switch (platform) {
+        case 'win32': // Windows
+          WORKSPACE_PATH = path.join(process.env.APPDATA || '', 'Cursor', 'User', 'workspaceStorage');
+          break;
+        case 'darwin': // macOS
+          WORKSPACE_PATH = path.join(homeDir, 'Library', 'Application Support', 'Cursor', 'User', 'workspaceStorage');
+          break;
+        case 'linux':
+          // 检查是否在 WSL 环境中
+          const isWSL = fs.existsSync('/proc/version') && 
+            (await fsPromises.readFile('/proc/version', 'utf-8')).toLowerCase().includes('microsoft');
+          
+          if (isWSL) {
+            // 在 WSL 中使用 Windows 路径
+            const windowsHome = (await fsPromises.readFile('/etc/wsl.conf', 'utf-8'))
+              .split('\n')
+              .find(line => line.startsWith('root'))
+              ?.split('=')[1]
+              ?.trim() || '/mnt/c/Users/Public';
+            
+            WORKSPACE_PATH = path.join(windowsHome, 'AppData', 'Roaming', 'Cursor', 'User', 'workspaceStorage');
+          } else {
+            // 标准 Linux 路径
+            WORKSPACE_PATH = path.join(homeDir, '.config', 'Cursor', 'User', 'workspaceStorage');
+          }
+          break;
+        default:
+          throw new Error(`不支持的平台: ${platform}`);
+      }
+
+      // 检查工作区路径是否存在
+      if (!fs.existsSync(WORKSPACE_PATH)) {
+        throw new Error(`未找到工作区存储路径: ${WORKSPACE_PATH}`);
+      }
+
+      return WORKSPACE_PATH;
+    } catch (err) {
+      logError("获取Cursor工作区路径失败:", err);
+      throw err;
     }
-    
-    // 尝试不同方法提取消息
-    let messages: FormattedMessage[] = [];
-    
-    // 按优先级尝试提取
-    messages = extractFromCursorSpecific(context);
-    if (messages.length > 0) return truncateLongMessages(messages);
-    
-    messages = extractFromChatHistory(context);
-    if (messages.length > 0) return truncateLongMessages(messages);
-    
-    messages = extractFromConversation(context);
-    if (messages.length > 0) return truncateLongMessages(messages);
-    
-    messages = extractFromBubbles(context);
-    if (messages.length > 0) return truncateLongMessages(messages);
-    
-    messages = extractFromMessagesOrHistory(context);
-    if (messages.length > 0) return truncateLongMessages(messages);
-    
-    messages = extractFromArrayContext(context);
-    if (messages.length > 0) return truncateLongMessages(messages);
-    
-    // 如果所有方法都失败，尝试直接查找对话数据
-    logWarning("所有已知格式提取失败，尝试递归搜索对话数据");
-    messages = findMessagesRecursively(context);
-    
-    if (messages.length === 0) {
-      logWarning("无法从上下文中提取任何对话内容");
-    } else {
-      logInfo(`从递归搜索中找到了 ${messages.length} 条消息`);
-    }
-    
-    return truncateLongMessages(messages);
   }
   
   /**
-   * 递归搜索对话消息
-   * 在复杂的嵌套结构中寻找可能的消息数组
+   * 查找最近修改的工作区ID
    */
-  function findMessagesRecursively(obj: any, path: string = 'root'): FormattedMessage[] {
-    if (!obj || typeof obj !== 'object') {
-      return [];
-    }
-    
-    // 避免循环引用和过深递归
-    if (path.split('.').length > 10) {
-      return [];
-    }
-    
-    // 如果是数组，检查是否是消息数组
-    if (Array.isArray(obj) && obj.length > 0) {
-      // 尝试将数组解析为消息
-      try {
-        const messages = obj.map(item => {
-          // 检查是否像消息对象
-          if (item && typeof item === 'object') {
-            // 检查是否有角色和内容属性
-            const hasRoleProperty = item.role !== undefined || 
-                                  item.type !== undefined || 
-                                  item.sender !== undefined ||
-                                  item.isUser !== undefined;
-                                  
-            const hasContentProperty = item.content !== undefined || 
-                                      item.text !== undefined || 
-                                      item.message !== undefined;
-            
-            if (hasRoleProperty && hasContentProperty) {
-              const role = determineRole(item);
-              let content = '';
-              
-              if (typeof item.content === 'string') {
-                content = item.content;
-              } else if (typeof item.text === 'string') {
-                content = item.text;
-              } else if (typeof item.message === 'string') {
-                content = item.message;
-              } else if (item.content && typeof item.content.text === 'string') {
-                content = item.content.text;
-              }
-              
-              return { role, content };
-            }
-          }
-          return null;
-        }).filter(item => item !== null && item.content && item.content.trim() !== "");
-        
-        if (messages.length > 1) {  // 至少需要2条消息才认为是对话
-          logDebug(`在路径 ${path} 找到可能的消息数组，长度: ${messages.length}`);
-          return messages as FormattedMessage[];
-        }
-      } catch (err) {
-        // 忽略错误，继续递归搜索
+  async function findRecentWorkspaceId(): Promise<string> {
+    try {
+      // 获取工作区存储路径
+      const workspacePath = await getCursorWorkspacePath();
+      logInfo("工作区存储路径:", workspacePath);
+      
+      // 读取所有工作区目录
+      const entries = await fsPromises.readdir(workspacePath, { withFileTypes: true });
+      const directories = entries.filter(entry => entry.isDirectory());
+      
+      if (directories.length === 0) {
+        throw new Error("未找到任何工作区目录");
       }
       
-      // 如果数组自身不是消息数组，递归检查其中的对象
-      for (let i = 0; i < obj.length; i++) {
-        if (obj[i] && typeof obj[i] === 'object') {
-          const result = findMessagesRecursively(obj[i], `${path}[${i}]`);
-          if (result.length > 0) {
-            return result;
+      logInfo(`找到 ${directories.length} 个工作区目录`);
+      
+      // 获取每个目录的修改时间
+      const dirWithTimes = await Promise.all(
+        directories.map(async (dir) => {
+          const dirPath = path.join(workspacePath, dir.name);
+          const dbPath = path.join(dirPath, 'state.vscdb');
+          
+          // 检查数据库文件是否存在
+          if (!fs.existsSync(dbPath)) {
+            return {
+              id: dir.name,
+              path: dirPath,
+              mtime: new Date(0) // 如果数据库不存在，设置一个很旧的时间
+            };
+          }
+          
+          const stats = await fsPromises.stat(dbPath);
+          return {
+            id: dir.name,
+            path: dirPath,
+            dbPath: dbPath,
+            mtime: stats.mtime
+          };
+        })
+      );
+      
+      // 过滤掉没有数据库文件的目录
+      const validDirs = dirWithTimes.filter(dir => dir.dbPath);
+      
+      if (validDirs.length === 0) {
+        throw new Error("未找到任何包含state.vscdb的工作区目录");
+      }
+      
+      // 按修改时间排序（最新的在前）
+      validDirs.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+      
+      // 获取最近修改的工作区ID
+      const recentWorkspaceId = validDirs[0].id;
+      logInfo(`最近活跃的工作区ID: ${recentWorkspaceId}, 数据库: ${validDirs[0].dbPath}`);
+      
+      return recentWorkspaceId;
+    } catch (err) {
+      logError("查找最近工作区ID失败:", err);
+      throw err;
+    }
+  }
+  
+  /**
+   * 处理从数据库提取的聊天记录
+   */
+  function processChatData(chatData: any): FormattedMessage[] {
+    try {
+      if (!chatData) {
+        logWarning("聊天记录数据为空");
+        return [];
+      }
+      
+      // 尝试解析JSON数据
+      let data;
+      if (typeof chatData === 'string') {
+        try {
+          data = JSON.parse(chatData);
+        } catch (e) {
+          logError("解析聊天记录JSON失败:", e);
+          return [];
+        }
+      } else {
+        data = chatData;
+      }
+      
+      logDebug("提取聊天记录数据类型:", typeof data);
+      
+      // 处理tabs结构
+      if (data.tabs && Array.isArray(data.tabs) && data.tabs.length > 0) {
+        logInfo(`找到 ${data.tabs.length} 个聊天标签页`);
+        // 使用最近的标签页
+        const recentTab = data.tabs[data.tabs.length - 1];
+        
+        if (recentTab.conversation && Array.isArray(recentTab.conversation)) {
+          logInfo(`提取标签页的对话内容，共 ${recentTab.conversation.length} 条消息`);
+          return recentTab.conversation
+            .map((msg: any) => ({
+              role: determineRole(msg),
+              content: typeof msg.text === 'string' ? msg.text : 
+                      (typeof msg.content === 'string' ? msg.content : ""),
+              timestamp: msg.timestamp ? new Date(msg.timestamp) : undefined
+            }))
+            .filter((msg: any) => msg.content && msg.content.trim() !== "");
+        }
+      }
+      
+      // 处理chats结构
+      if (data.chats && typeof data.chats === 'object') {
+        const chatIds = Object.keys(data.chats);
+        if (chatIds.length > 0) {
+          logInfo(`找到 ${chatIds.length} 个聊天会话`);
+          // 使用第一个聊天
+          const chatId = chatIds[0];
+          const chat = data.chats[chatId];
+          
+          if (chat.messages && Array.isArray(chat.messages)) {
+            logInfo(`提取聊天会话的消息内容，共 ${chat.messages.length} 条消息`);
+            return chat.messages
+              .map((msg: any) => ({
+                role: determineRole(msg),
+                content: typeof msg.text === 'string' ? msg.text : 
+                        (typeof msg.content === 'string' ? msg.content : ""),
+                timestamp: msg.timestamp ? new Date(msg.timestamp) : undefined
+              }))
+              .filter((msg: any) => msg.content && msg.content.trim() !== "");
           }
         }
       }
-    } else {
-      // 对象类型，遍历所有属性
-      for (const key in obj) {
-        if (Object.prototype.hasOwnProperty.call(obj, key) && obj[key] && typeof obj[key] === 'object') {
-          const result = findMessagesRecursively(obj[key], `${path}.${key}`);
-          if (result.length > 0) {
-            return result;
+      
+      // 处理messages结构
+      if (data.messages && Array.isArray(data.messages)) {
+        logInfo(`提取消息数组，共 ${data.messages.length} 条消息`);
+        return data.messages
+          .map((msg: any) => ({
+            role: determineRole(msg),
+            content: typeof msg.text === 'string' ? msg.text : 
+                    (typeof msg.content === 'string' ? msg.content : ""),
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : undefined
+          }))
+          .filter((msg: any) => msg.content && msg.content.trim() !== "");
+      }
+      
+      // 处理conversation结构
+      if (data.conversation && Array.isArray(data.conversation)) {
+        logInfo(`提取对话内容，共 ${data.conversation.length} 条消息`);
+        return data.conversation
+          .map((msg: any) => ({
+            role: determineRole(msg),
+            content: typeof msg.text === 'string' ? msg.text : 
+                    (typeof msg.content === 'string' ? msg.content : ""),
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : undefined
+          }))
+          .filter((msg: any) => msg.content && msg.content.trim() !== "");
+      }
+      
+      logWarning("未找到有效的聊天结构");
+      return [];
+    } catch (err) {
+      logError("处理聊天记录数据失败:", err);
+      return [];
+    }
+  }
+  
+  /**
+   * 查找并处理composer数据
+   */
+  async function findComposerData(workspaceId: string): Promise<FormattedMessage[]> {
+    let db: any = null;
+    let globalDb: any = null;
+    
+    try {
+      // 获取工作区存储路径
+      const workspacePath = await getCursorWorkspacePath();
+      const dbPath = path.join(workspacePath, workspaceId, 'state.vscdb');
+      const globalDbPath = path.join(workspacePath, '..', 'globalStorage', 'state.vscdb');
+      
+      logInfo(`查找composer数据，工作区数据库: ${dbPath}`);
+      logInfo(`全局数据库路径: ${globalDbPath}`);
+      
+      // 检查数据库文件是否存在
+      if (!fs.existsSync(dbPath)) {
+        throw new Error(`未找到数据库文件: ${dbPath}`);
+      }
+      
+      // 打开数据库连接
+      db = await open({
+        filename: dbPath,
+        driver: sqlite3.Database,
+        mode: sqlite3.OPEN_READONLY
+      });
+      
+      // 配置数据库优化选项
+      await db.exec('PRAGMA cache_size = 10000');
+      await db.exec('PRAGMA temp_store = MEMORY');
+      await db.exec('PRAGMA journal_mode = OFF');
+      await db.exec('PRAGMA synchronous = OFF');
+      
+      // 可能的composer数据键名
+      const composerKeys = [
+        "composer.composerData", 
+        "cursor.composerData", 
+        "cursorComposerData",
+        "composer.data",
+        "workbench.panel.composer.data",
+        "workbench.panel.aichat.view.aichat.chatdata",
+        "workbench.panel.chat.view.chat.chatdata"
+      ];
+      
+      // 尝试获取composer数据
+      let composerResult = null;
+      
+      // 检查表结构
+      let tables = await db.all("SELECT name FROM sqlite_master WHERE type='table'");
+      let tableNames = tables.map((t: any) => t.name);
+      
+      const hasItemTable = tableNames.includes('ItemTable');
+      
+      if (hasItemTable) {
+        // 依次尝试所有可能的composer键
+        for (const key of composerKeys) {
+          logInfo(`尝试查询composer键: ${key}`);
+          const result = await db.get('SELECT value FROM ItemTable WHERE [key] = ?', [key]);
+          if (result?.value) {
+            logInfo(`在键 ${key} 中找到composer数据`);
+            composerResult = result;
+            break;
+          }
+        }
+        
+        // 如果没有找到，尝试模糊查询
+        if (!composerResult) {
+          logInfo("未找到直接匹配的composerKeys，尝试模糊查询");
+          const likeQueries = await db.all(`
+            SELECT [key], value FROM ItemTable 
+            WHERE [key] LIKE '%composer%' OR [key] LIKE '%chat%' OR [key] LIKE '%conversation%'
+            LIMIT 20
+          `);
+          
+          logInfo(`模糊查询结果数量: ${likeQueries.length}`);
+          
+          // 尝试解析每个可能的键
+          for (const item of likeQueries) {
+            try {
+              const parsed = JSON.parse(item.value);
+              // 寻找与composer相关的数据结构
+              if (parsed.allComposers || parsed.composers || 
+                (Array.isArray(parsed) && parsed.length > 0 && parsed[0].composerId)) {
+                logInfo(`通过模糊查询找到可能的composer数据: ${item.key}`);
+                composerResult = item;
+                break;
+              }
+            } catch (e) {
+              // 忽略解析错误
+            }
           }
         }
       }
+      
+      // 关闭数据库连接
+      await db.close();
+      db = null;
+      
+      // 如果找到了composer元数据
+      if (composerResult?.value) {
+        try {
+          const composerData = JSON.parse(composerResult.value);
+          logInfo("已解析composer数据");
+          
+          // 尝试找到composer数组
+          let allComposers = null;
+          
+          if (composerData.allComposers) {
+            allComposers = composerData.allComposers;
+          } else if (composerData.composers) {
+            allComposers = composerData.composers;
+          } else if (Array.isArray(composerData) && composerData.length > 0) {
+            allComposers = composerData;
+          }
+          
+          if (allComposers && Array.isArray(allComposers) && allComposers.length > 0) {
+            logInfo(`找到${allComposers.length}个composer`);
+            
+            // 按照最后更新时间排序
+            const sortedComposers = allComposers
+              .filter((c: any) => c && typeof c === 'object') // 确保是有效对象
+              .sort((a: any, b: any) => (b.lastUpdatedAt || 0) - (a.lastUpdatedAt || 0));
+            
+            if (sortedComposers.length > 0) {
+              // 获取最近的composer
+              const recentComposer = sortedComposers[0];
+              const composerId = recentComposer.composerId || recentComposer.id;
+              
+              if (composerId) {
+                logInfo(`找到最近的composer: ${composerId}`);
+                
+                // 检查全局数据库是否存在
+                if (!fs.existsSync(globalDbPath)) {
+                  logWarning("全局数据库文件不存在:", globalDbPath);
+                  return [];
+                }
+                
+                // 打开全局数据库连接
+                globalDb = await open({
+                  filename: globalDbPath,
+                  driver: sqlite3.Database,
+                  mode: sqlite3.OPEN_READONLY
+                });
+                
+                // 同样配置数据库优化选项
+                await globalDb.exec('PRAGMA cache_size = 10000');
+                await globalDb.exec('PRAGMA temp_store = MEMORY');
+                await globalDb.exec('PRAGMA journal_mode = OFF');
+                await globalDb.exec('PRAGMA synchronous = OFF');
+                
+                // 确定正确的表名
+                const tableExists = async (tableName: string) => {
+                  try {
+                    const result = await globalDb.get(
+                      `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, 
+                      [tableName]
+                    );
+                    return !!result;
+                  } catch (e) {
+                    logError(`检查表 ${tableName} 是否存在出错:`, e);
+                    return false;
+                  }
+                };
+                
+                const isCursorTable = await tableExists('cursorDiskKV');
+                const tableName = isCursorTable ? 'cursorDiskKV' : 'ItemTable';
+                logInfo(`使用表: ${tableName}`);
+                
+                // 查询特定composerId的内容
+                const key = `composerData:${composerId}`;
+                logInfo(`查询键: ${key}`);
+                
+                let composerContent = null;
+                try {
+                  composerContent = await globalDb.get(`
+                    SELECT [key], value FROM ${tableName}
+                    WHERE [key] = ?
+                  `, [key]);
+                  
+                  // 关闭数据库连接
+                  await globalDb.close();
+                  globalDb = null;
+                  
+                  // 找到了内容，则处理并返回
+                  if (composerContent && composerContent.value) {
+                    logInfo(`找到composer内容，大小: ${composerContent.value.length} 字节`);
+                    
+                    try {
+                      const content = JSON.parse(composerContent.value);
+                      // 处理对话内容
+                      return processComposerContent(content, recentComposer);
+                    } catch (e) {
+                      logError("解析composer内容时出错:", e);
+                    }
+                  } else {
+                    logWarning(`找不到composer内容: ${key}`);
+                  }
+                } catch (dbError) {
+                  logError("数据库查询出错:", dbError);
+                  if (globalDb) await globalDb.close();
+                }
+              }
+            }
+          }
+        } catch (e) {
+          logError("解析composer数据时出错:", e);
+        }
+      } else {
+        logWarning("未找到任何composer数据");
+      }
+      
+      return [];
+    } catch (err) {
+      logError("查找composer数据失败:", err);
+      
+      // 确保关闭数据库连接
+      if (db) {
+        try {
+          await db.close();
+        } catch (closeErr) {
+          logError("关闭工作区数据库连接失败:", closeErr);
+        }
+      }
+      if (globalDb) {
+        try {
+          await globalDb.close();
+        } catch (closeErr) {
+          logError("关闭全局数据库连接失败:", closeErr);
+        }
+      }
+      
+      return [];
+    }
+  }
+  
+  /**
+   * 处理composer内容
+   */
+  function processComposerContent(content: any, composer: any): FormattedMessage[] {
+    // 如果没有内容，返回空数组
+    if (!content) {
+      logWarning("Composer内容为空");
+      return [];
     }
     
-    return [];
+    try {
+      // 处理对话数组
+      if (content.conversation && Array.isArray(content.conversation)) {
+        logInfo(`处理composer对话数组，共 ${content.conversation.length} 条消息`);
+        return content.conversation
+          .map((msg: any) => ({
+            role: determineRole(msg),
+            content: typeof msg.text === 'string' ? msg.text : 
+                   (typeof msg.content === 'string' ? msg.content : ""),
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : undefined
+          }))
+          .filter((msg: any) => msg.content && msg.content.trim() !== "");
+      }
+      
+      // 处理消息数组
+      if (content.messages && Array.isArray(content.messages)) {
+        logInfo(`处理composer消息数组，共 ${content.messages.length} 条消息`);
+        return content.messages
+          .map((msg: any) => ({
+            role: determineRole(msg),
+            content: typeof msg.text === 'string' ? msg.text : 
+                   (typeof msg.content === 'string' ? msg.content : ""),
+            timestamp: msg.timestamp ? new Date(msg.timestamp) : undefined
+          }))
+          .filter((msg: any) => msg.content && msg.content.trim() !== "");
+      }
+      
+      // 处理简单文本
+      if (content.text || composer.text) {
+        const text = content.text || composer.text;
+        logInfo(`处理composer简单文本，长度: ${text ? text.length : 0}`);
+        if (text) {
+          return [{
+            role: 'user',
+            content: text
+          }];
+        }
+      }
+      
+      logWarning("未在composer内容中找到有效的消息结构");
+      return [];
+    } catch (err) {
+      logError("处理composer内容失败:", err);
+      return [];
+    }
+  }
+  
+  /**
+   * 从本地SQLite数据库读取工作区数据
+   */
+  async function readWorkspaceData(workspaceId: string): Promise<FormattedMessage[]> {
+    let db = null;
+    
+    try {
+      // 获取工作区存储路径
+      const workspacePath = await getCursorWorkspacePath();
+      const dbPath = path.join(workspacePath, workspaceId, 'state.vscdb');
+      
+      logInfo(`打开数据库: ${dbPath}`);
+      
+      // 检查数据库文件是否存在
+      if (!fs.existsSync(dbPath)) {
+        throw new Error(`未找到数据库文件: ${dbPath}`);
+      }
+      
+      // 打开数据库连接
+      db = await open({
+        filename: dbPath,
+        driver: sqlite3.Database,
+        mode: sqlite3.OPEN_READONLY
+      });
+      
+      // 配置数据库优化选项
+      await db.exec('PRAGMA cache_size = 10000');
+      await db.exec('PRAGMA temp_store = MEMORY');
+      await db.exec('PRAGMA journal_mode = OFF');
+      await db.exec('PRAGMA synchronous = OFF');
+      
+      // 可能的聊天记录键名
+      const possibleKeys = [
+        'workbench.panel.chat.view.chat.chatdata',
+        'workbench.panel.aichat.view.aichat.chatdata',
+        'aichat.chatData',
+        'aichat.history',
+        'chat.history',
+        'chat.data'
+      ];
+      
+      // 尝试获取聊天数据
+      let chatResult = null;
+      
+      // 先检查ItemTable表是否存在
+      let tables = await db.all("SELECT name FROM sqlite_master WHERE type='table'");
+      let tableNames = tables.map((t: any) => t.name);
+      logInfo(`数据库中的表: ${tableNames.join(', ')}`);
+      
+      const hasItemTable = tableNames.includes('ItemTable');
+      
+      if (hasItemTable) {
+        // 尝试常见键名
+        for (const key of possibleKeys) {
+          logInfo(`尝试查询键: ${key}`);
+          const result = await db.get('SELECT value FROM ItemTable WHERE [key] = ?', [key]);
+          if (result?.value) {
+            logInfo(`在键 ${key} 中找到聊天数据`);
+            chatResult = result;
+            break;
+          }
+        }
+        
+        // 如果没有找到，尝试模糊查询
+        if (!chatResult) {
+          logInfo("未找到精确匹配的键，尝试模糊查询");
+          const likeResults = await db.all(`
+            SELECT [key], value FROM ItemTable 
+            WHERE [key] LIKE '%chat%' OR [key] LIKE '%conversation%' OR [key] LIKE '%history%' 
+            LIMIT 20
+          `);
+          
+          logInfo(`模糊查询找到 ${likeResults.length} 个潜在键`);
+          
+          // 尝试解析每个可能的键
+          for (const item of likeResults) {
+            try {
+              const value = item.value;
+              logInfo(`尝试解析键 ${item.key} 的值`);
+              
+              // 尝试解析JSON
+              const data = JSON.parse(value);
+              if (data.tabs || data.chats || data.messages || data.conversation) {
+                logInfo(`在键 ${item.key} 中找到有效的聊天数据结构`);
+                chatResult = item;
+                break;
+              }
+            } catch (e) {
+              // 忽略解析错误
+            }
+          }
+        }
+      }
+      
+      // 如果找到了聊天数据，处理它
+      if (chatResult && chatResult.value) {
+        const messages = processChatData(chatResult.value);
+        if (messages.length > 0) {
+          logInfo(`成功从数据库提取了 ${messages.length} 条消息`);
+          await db.close();
+          return messages;
+        }
+      }
+      
+      // 如果还没找到数据，尝试其他表
+      if (tableNames.includes('cursorDiskKV')) {
+        logInfo("尝试从cursorDiskKV表查询数据");
+        const kvResults = await db.all(`
+          SELECT [key], value FROM cursorDiskKV
+          WHERE [key] LIKE '%chat%' OR [key] LIKE '%conversation%'
+          LIMIT 20
+        `);
+        
+        for (const item of kvResults) {
+          try {
+            logInfo(`尝试解析键 ${item.key} 的值`);
+            const data = JSON.parse(item.value);
+            if (data.tabs || data.chats || data.messages || data.conversation) {
+              logInfo(`在cursorDiskKV表的键 ${item.key} 中找到有效的聊天数据`);
+              const messages = processChatData(data);
+              if (messages.length > 0) {
+                logInfo(`成功从cursorDiskKV表提取了 ${messages.length} 条消息`);
+                await db.close();
+                return messages;
+              }
+            }
+          } catch (e) {
+            // 忽略解析错误
+          }
+        }
+      }
+      
+      // 关闭数据库连接
+      await db.close();
+      db = null;
+      
+      // 如果在聊天记录中找不到数据，尝试从composer中获取
+      logInfo("在聊天记录中未找到数据，尝试查找composer数据");
+      const composerMessages = await findComposerData(workspaceId);
+      if (composerMessages.length > 0) {
+        logInfo(`成功从composer数据中提取了 ${composerMessages.length} 条消息`);
+        return composerMessages;
+      }
+      
+      logWarning("无法在数据库中找到有效的聊天记录或composer数据");
+      return [];
+    } catch (err) {
+      logError("从数据库读取工作区数据失败:", err);
+      
+      // 确保关闭数据库连接
+      if (db) {
+        try {
+          await db.close();
+        } catch (closeErr) {
+          logError("关闭数据库连接失败:", closeErr);
+        }
+      }
+      
+      return [];
+    }
+  }
+  
+  /**
+   * 主提取函数 - 从本地SQLite数据库读取对话内容
+   */
+  export async function extractConversation(context: any): Promise<FormattedMessage[]> {
+    logInfo("=====> 开始从SQLite数据库读取对话内容 <=====");
+    
+    try {
+      // 查找最近的工作区ID
+      const workspaceId = await findRecentWorkspaceId();
+      
+      // 从数据库读取该工作区的对话数据
+      const messages = await readWorkspaceData(workspaceId);
+      
+      if (messages.length > 0) {
+        logInfo(`成功从数据库读取了 ${messages.length} 条消息`);
+        return truncateLongMessages(messages);
+      }
+      
+      logWarning(`工作区 ${workspaceId} 中未找到任何对话内容`);
+      return [];
+    } catch (err) {
+      logError("读取对话内容失败:", err);
+      return [];
+    }
   } 

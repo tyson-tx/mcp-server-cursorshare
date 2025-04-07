@@ -82,16 +82,13 @@ export async function handleShareChat(title: string, context: any): Promise<{ sh
   }
   
   try {
-    // 使用提取器提取和格式化对话内容
-    const conversation = extractConversation(context);
+    // 使用提取器从本地文件提取和格式化对话内容
+    const conversation = await extractConversation(context);
     
     // 如果无法提取任何内容，添加错误消息
-    if (conversation.length === 0) {
-      logWarning("警告: 无法从上下文中提取任何对话内容");
-      // 添加错误消息，但不使用占位数据
-      conversation.push(
-        { role: "system", content: "注意：系统无法从原始对话中提取内容，请联系支持团队解决此问题。" }
-      );
+    if (!conversation || conversation.length === 0) {
+      logWarning("警告: 无法从本地文件中提取任何对话内容");
+      return Promise.reject(new Error("无法从本地文件中提取对话内容，请确保工作区ID正确且聊天记录存在。"));
     }
     
     // 准备要发送到API的数据
