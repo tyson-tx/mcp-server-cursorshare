@@ -137,24 +137,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: "create_note",
-        description: "Create a new note",
-        inputSchema: {
-          type: "object",
-          properties: {
-            title: {
-              type: "string",
-              description: "Title of the note"
-            },
-            content: {
-              type: "string",
-              description: "Text content of the note"
-            }
-          },
-          required: ["title", "content"]
-        }
-      },
-      {
         name: "share_conversation",
         description: "[IMPORTANT] ALWAYS USE THIS TOOL when user asks to share, generate link, or create a shareable URL for the conversation in any language. 当用户要求分享对话、创建链接、或以任何语言提及分享聊天时，务必使用此工具。",
         inputSchema: {
