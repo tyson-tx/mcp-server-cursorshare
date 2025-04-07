@@ -22,6 +22,8 @@ import {
 
 // 导入分享功能和服务器
 import { handleShareChat, updateConfig } from "./share.js";
+// 导入日志模块
+import { updateLoggerConfig, logInfo, logError, logUserAccess, LogLevel } from "./logger.js";
 
 /**
  * 安全日志函数 - 使用stderr避免干扰MCP通信
@@ -32,6 +34,14 @@ function safeLog(...args: any[]): void {
     typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
   ).join(' ') + '\n');
 }
+
+// 初始化日志配置
+updateLoggerConfig({
+  level: LogLevel.INFO,
+  enabled: true,
+  logToFile: true,
+  logToConsole: true
+});
 
 // 移除本地Web服务器启动代码
 // 直接设置云端API配置
@@ -80,6 +90,7 @@ const server = new Server(
  * - Human readable name and description (now including the note title)
  */
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
+  logInfo("用户请求列出可用资源");
   return {
     resources: Object.entries(notes).map(([id, note]) => ({
       uri: `note:///${id}`,
@@ -99,8 +110,12 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   const id = url.pathname.replace(/^\//, '');
   const note = notes[id];
 
+  logInfo(`用户请求读取资源: ${id}`);
+
   if (!note) {
-    throw new Error(`Note ${id} not found`);
+    const errorMsg = `Note ${id} not found`;
+    logError(errorMsg);
+    throw new Error(errorMsg);
   }
 
   return {
@@ -117,6 +132,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
  * Exposes a single "create_note" tool that lets clients create new notes.
  */
 server.setRequestHandler(ListToolsRequestSchema, async () => {
+  logInfo("用户请求列出可用工具");
   return {
     tools: [
       {
@@ -165,11 +181,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const title = String(request.params.arguments?.title);
       const content = String(request.params.arguments?.content);
       if (!title || !content) {
-        throw new Error("Title and content are required");
+        const errorMsg = "Title and content are required";
+        logError(errorMsg);
+        throw new Error(errorMsg);
       }
 
       const id = String(Object.keys(notes).length + 1);
       notes[id] = { title, content };
+      
+      logInfo(`用户创建笔记: ${id}, 标题: ${title}`);
 
       return {
         content: [{
@@ -183,15 +203,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Get optional title or use default
       const title = String(request.params.arguments?.title || "Shared Chat");
       
-      // 添加调试日志
-      safeLog("Share conversation request received! Params:", request.params);
+      // 添加调试日志并记录用户操作
+      logInfo("收到分享会话请求，标题:", title);
       
       try {
-        // 使用share.ts中的函数处理分享请求 - 注意这里是异步操作
+        // 获取用户ID信息
         const context = request.params.context as any;
+        const userId = context?.user?.id || context?.userId || "anonymous";
+        
+        // 记录用户访问
+        logUserAccess(userId, "分享对话", { title });
+        
+        // 使用share.ts中的函数处理分享请求 - 注意这里是异步操作
         const { shareId, shareUrl } = await handleShareChat(title, context);
         
-        safeLog(`Successfully created share with ID: ${shareId}`);
+        logInfo(`成功创建分享，ID: ${shareId}`);
         
         // 双语回复，增加模型触发指示
         return {
@@ -201,12 +227,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }]
         };
       } catch (error: any) {
-        safeLog("Error sharing conversation:", error);
+        logError("分享对话失败:", error);
         throw new Error(`分享失败 / Share failed: ${error.message}`);
       }
     }
 
     default:
+      logError("未知工具请求:", request.params.name);
       throw new Error("Unknown tool");
   }
 });
@@ -216,6 +243,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
  * Exposes a single "summarize_notes" prompt that summarizes all notes.
  */
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
+  logInfo("用户请求列出可用提示");
   return {
     prompts: [
       {
@@ -232,8 +260,11 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
  */
 server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   if (request.params.name !== "summarize_notes") {
+    logError("未知提示请求:", request.params.name);
     throw new Error("Unknown prompt");
   }
+
+  logInfo("用户请求摘要提示");
 
   const embeddedNotes = Object.entries(notes).map(([id, note]) => ({
     type: "resource" as const,
@@ -248,31 +279,25 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
     messages: [
       {
         role: "user",
-        content: {
-          type: "text",
-          text: "Please summarize the following notes:"
-        }
-      },
-      ...embeddedNotes.map(note => ({
-        role: "user" as const,
-        content: note
-      })),
-      {
-        role: "user",
-        content: {
-          type: "text",
-          text: "Provide a concise summary of all the notes above."
-        }
+        content: [
+          {
+            type: "text",
+            text: "Please summarize the following notes:"
+          },
+          ...embeddedNotes
+        ]
       }
     ]
   };
 });
 
-// 启动服务器 - 使用stderr记录日志
-safeLog("Starting MCP server...");
-const transport = new StdioServerTransport();
-server.connect(transport).catch(error => {
-  safeLog("Failed to connect transport:", error);
+// 启动服务器 - 使用更好的日志方式
+logInfo("正在启动MCP服务器...");
+
+// 修复server.listen不存在的问题，使用server.connect
+server.connect(new StdioServerTransport()).catch((error: Error) => {
+  logError("服务器启动失败:", error);
   process.exit(1);
 });
-safeLog("MCP server is running and waiting for connections...");
+
+logInfo("MCP服务器正在运行并等待连接...");
